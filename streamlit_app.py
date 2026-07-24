@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import docx
+import pdfplumber
 import json
 import os
 import re
@@ -8,7 +9,7 @@ import re
 st.set_page_config(page_title="B'Cebu Class Schedule Finder", page_icon="📚", layout="wide")
 
 st.title("🎓 B'Cebu Class Schedule System")
-st.caption("API NEXT EDU, Inc. — Word Document Extractor & Search App")
+st.caption("API NEXT EDU, Inc. — Class Schedule Search & Extractor App")
 
 DB_FILE = "schedules_data.json"
 
@@ -28,10 +29,8 @@ def save_schedules(data):
 if "schedules_db" not in st.session_state:
     st.session_state["schedules_db"] = load_schedules()
 
-def parse_docx(file, filename):
+def parse_docx(file):
     doc = docx.Document(file)
-    
-    # 1. Extract raw text from paragraphs and table cells
     raw_texts = []
     
     for p in doc.paragraphs:
@@ -46,7 +45,27 @@ def parse_docx(file, filename):
                 if txt and (not raw_texts or raw_texts[-1] != txt):
                     raw_texts.append(txt)
 
-    # Helper function to find header field values
+    return process_extracted_texts(raw_texts, doc.tables, file.name)
+
+def parse_pdf(file):
+    raw_texts = []
+    extracted_rows = []
+    
+    with pdfplumber.open(file) as pdf:
+        for page in pdf.pages:
+            tables = page.extract_tables()
+            for table in tables:
+                for row in table:
+                    clean_row = [str(c).strip().replace('\n', ' ') for c in row if c is not None and str(c).strip()]
+                    if clean_row:
+                        extracted_rows.append(clean_row)
+                        for cell_text in clean_row:
+                            if not raw_texts or raw_texts[-1] != cell_text:
+                                raw_texts.append(cell_text)
+                                
+    return process_pdf_data(raw_texts, extracted_rows, file.name)
+
+def process_extracted_texts(raw_texts, tables, filename):
     def find_field(keyword):
         for idx, item in enumerate(raw_texts):
             clean_item = item.lower().replace(":", "").strip()
@@ -63,7 +82,6 @@ def parse_docx(file, filename):
     duration = find_field("Duration")
     nationality = find_field("Nationality")
 
-    # Fallback to filename without extension if name isn't cleanly extracted
     clean_filename = os.path.splitext(filename)[0]
     final_name = name if name != "N/A" else f"Student ({clean_filename})"
 
@@ -76,8 +94,7 @@ def parse_docx(file, filename):
         "Schedule": []
     }
 
-    # 2. Extract schedule rows
-    for table in doc.tables:
+    for table in tables:
         for row in table.rows:
             row_cells = []
             for cell in row.cells:
@@ -97,8 +114,50 @@ def parse_docx(file, filename):
 
     return student_data
 
+def process_pdf_data(raw_texts, rows, filename):
+    def find_field(keyword):
+        for idx, item in enumerate(raw_texts):
+            clean_item = item.lower().replace(":", "").strip()
+            if clean_item == keyword.lower():
+                if idx + 1 < len(raw_texts):
+                    val = raw_texts[idx + 1].replace("|", "").strip()
+                    if val and not any(k in val.lower() for k in ["name", "nickname", "course", "duration", "nationality"]):
+                        return val
+        return "N/A"
+
+    name = find_field("Name")
+    nickname = find_field("Nickname")
+    course = find_field("Course")
+    duration = find_field("Duration")
+    nationality = find_field("Nationality")
+
+    clean_filename = os.path.splitext(filename)[0]
+    final_name = name if name != "N/A" else f"Student ({clean_filename})"
+
+    student_data = {
+        "Name": final_name,
+        "Nickname": nickname if nickname != "N/A" else "-",
+        "Course": course if course != "N/A" else "-",
+        "Duration": duration if duration != "N/A" else "-",
+        "Nationality": nationality if nationality != "N/A" else "-",
+        "Schedule": []
+    }
+
+    for row_cells in rows:
+        if row_cells and re.search(r"\d{2}:\d{2}\s*-\s*\d{2}:\d{2}", row_cells[0]):
+            student_data["Schedule"].append({
+                "Time Period": row_cells[0] if len(row_cells) > 0 else "-",
+                "Period": row_cells[1] if len(row_cells) > 1 else "-",
+                "Room": row_cells[2] if len(row_cells) > 2 else "-",
+                "Teacher": row_cells[3] if len(row_cells) > 3 else "-",
+                "Type": row_cells[4] if len(row_cells) > 4 else "-",
+                "Subject / Remarks": row_cells[5] if len(row_cells) > 5 else (row_cells[-1] if len(row_cells) > 3 else "-")
+            })
+
+    return student_data
+
 # App Navigation
-tab_search, tab_upload, tab_records = st.tabs(["🔍 Search Student Schedules", "📤 Admin Upload Word Files (.docx)", "📋 Stored Records"])
+tab_search, tab_upload, tab_records = st.tabs(["🔍 Search Student Schedules", "📤 Admin Upload Files (.docx / .pdf)", "📋 Stored Records"])
 
 # TAB 1: SEARCH INTERFACE
 with tab_search:
@@ -134,19 +193,21 @@ with tab_search:
 
 # TAB 2: UPLOAD INTERFACE
 with tab_upload:
-    st.subheader("Upload Word Documents (.docx)")
-    st.caption("Select one or multiple student schedule Word files to import them into the search system.")
+    st.subheader("Upload Word Documents (.docx) or PDFs (.pdf)")
+    st.caption("Select one or multiple student schedule files to import them into the search system.")
     
-    uploaded_files = st.file_uploader("Drop .docx files here", type=["docx"], accept_multiple_files=True)
+    uploaded_files = st.file_uploader("Drop .docx or .pdf files here", type=["docx", "pdf"], accept_multiple_files=True)
 
     if uploaded_files:
         if st.button("Extract & Save Schedules"):
             count = 0
             for file in uploaded_files:
                 try:
-                    parsed_info = parse_docx(file, file.name)
+                    if file.name.endswith(".pdf"):
+                        parsed_info = parse_pdf(file)
+                    else:
+                        parsed_info = parse_docx(file)
                     
-                    # Remove existing entry only if name matches exact string
                     st.session_state["schedules_db"] = [
                         s for s in st.session_state["schedules_db"] 
                         if s["Name"].lower() != parsed_info["Name"].lower()
