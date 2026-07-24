@@ -31,61 +31,58 @@ if "schedules_db" not in st.session_state:
 def parse_docx(file):
     doc = docx.Document(file)
     
-    # 1. Flatten all unique non-empty cells in the document
-    raw_cells = []
+    # Extract non-empty text values in sequential order
+    raw_texts = []
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 txt = cell.text.strip().replace('\n', ' ')
-                if txt and (not raw_cells or raw_cells[-1] != txt):
-                    raw_cells.append(txt)
+                if txt and (not raw_texts or raw_texts[-1] != txt):
+                    raw_texts.append(txt)
 
-    # 2. Extract metadata by finding label indices and fetching next value
-    def get_value_after(label_list):
-        for idx, text in enumerate(raw_cells):
-            for label in label_list:
-                if text.lower() == label.lower():
-                    # Return next item if available and not another label
-                    if idx + 1 < len(raw_cells):
-                        val = raw_cells[idx + 1].replace("|", "").strip()
-                        if val and not any(l in val.lower() for l in ["nickname:", "course:", "duration:", "nationality:"]):
-                            return val
+    # Function to get value following a target key
+    def find_field(keyword):
+        for idx, item in enumerate(raw_texts):
+            if item.lower().replace(":", "").strip() == keyword.lower():
+                if idx + 1 < len(raw_texts):
+                    val = raw_texts[idx + 1].replace("|", "").strip()
+                    if val and not any(k in val.lower() for k in ["name", "nickname", "course", "duration", "nationality"]):
+                        return val
         return "N/A"
 
-    student_name = get_value_after(["Name:", "Name"])
-    student_nickname = get_value_after(["Nickname:", "Nickname"])
-    student_course = get_value_after(["Course:", "Course"])
-    student_duration = get_value_after(["Duration:", "Duration"])
-    student_nationality = get_value_after(["Nationality:", "Nationality"])
+    name = find_field("Name")
+    nickname = find_field("Nickname")
+    course = find_field("Course")
+    duration = find_field("Duration")
+    nationality = find_field("Nationality")
 
     student_data = {
-        "Name": student_name if student_name != "N/A" else "Unknown Student",
-        "Nickname": student_nickname,
-        "Course": student_course,
-        "Duration": student_duration,
-        "Nationality": student_nationality,
+        "Name": name if name != "N/A" else "Unknown Student",
+        "Nickname": nickname,
+        "Course": course,
+        "Duration": duration,
+        "Nationality": nationality,
         "Schedule": []
     }
 
-    # 3. Extract Schedule rows matching time ranges (e.g., 08:00 - 08:45)
+    # Extract time slots
     for table in doc.tables:
         for row in table.rows:
             row_cells = []
             for cell in row.cells:
                 txt = cell.text.strip().replace('\n', ' ')
-                if not row_cells or row_cells[-1] != txt:
+                if txt and (not row_cells or row_cells[-1] != txt):
                     row_cells.append(txt)
             
-            # Check if row starts with a time format
-            if len(row_cells) >= 3 and re.search(r"\d{2}:\d{2}\s*-\s*\d{2}:\d{2}", row_cells[0]):
-                clean_row = [c for c in row_cells if c]
+            # Check if row starts with a time format like 08:00 - 08:45
+            if row_cells and re.search(r"\d{2}:\d{2}\s*-\s*\d{2}:\d{2}", row_cells[0]):
                 student_data["Schedule"].append({
-                    "Time Period": clean_row[0] if len(clean_row) > 0 else "-",
-                    "Period": clean_row[1] if len(clean_row) > 1 else "-",
-                    "Room": clean_row[2] if len(clean_row) > 2 else "-",
-                    "Teacher": clean_row[3] if len(clean_row) > 3 else "-",
-                    "Type": clean_row[4] if len(clean_row) > 4 else "-",
-                    "Subject / Book": clean_row[5] if len(clean_row) > 5 else (clean_row[-1] if len(clean_row) > 3 else "-")
+                    "Time Period": row_cells[0] if len(row_cells) > 0 else "-",
+                    "Period": row_cells[1] if len(row_cells) > 1 else "-",
+                    "Room": row_cells[2] if len(row_cells) > 2 else "-",
+                    "Teacher": row_cells[3] if len(row_cells) > 3 else "-",
+                    "Type": row_cells[4] if len(row_cells) > 4 else "-",
+                    "Subject / Remarks": row_cells[5] if len(row_cells) > 5 else (row_cells[-1] if len(row_cells) > 3 else "-")
                 })
 
     return student_data
@@ -121,7 +118,7 @@ with tab_search:
                     else:
                         st.warning("No individual class periods detected in this document.")
         else:
-            st.warning(f"No student found matching '{search_query}'. Check 'Stored Records' tab to confirm names.")
+            st.warning(f"No student found matching '{search_query}'.")
     else:
         st.info("💡 Type a student name or nickname above to view their schedule.")
 
@@ -139,7 +136,7 @@ with tab_upload:
                 try:
                     parsed_info = parse_docx(file)
                     
-                    # Remove duplicate entries if re-uploading
+                    # Prevent overwriting unless same student name
                     st.session_state["schedules_db"] = [
                         s for s in st.session_state["schedules_db"] 
                         if s["Name"].lower() != parsed_info["Name"].lower()
