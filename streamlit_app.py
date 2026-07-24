@@ -28,11 +28,17 @@ def save_schedules(data):
 if "schedules_db" not in st.session_state:
     st.session_state["schedules_db"] = load_schedules()
 
-def parse_docx(file):
+def parse_docx(file, filename):
     doc = docx.Document(file)
     
-    # Extract non-empty text values in sequential order
+    # 1. Extract raw text from paragraphs and table cells
     raw_texts = []
+    
+    for p in doc.paragraphs:
+        t = p.text.strip()
+        if t:
+            raw_texts.append(t)
+            
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
@@ -40,10 +46,11 @@ def parse_docx(file):
                 if txt and (not raw_texts or raw_texts[-1] != txt):
                     raw_texts.append(txt)
 
-    # Function to get value following a target key
+    # Helper function to find header field values
     def find_field(keyword):
         for idx, item in enumerate(raw_texts):
-            if item.lower().replace(":", "").strip() == keyword.lower():
+            clean_item = item.lower().replace(":", "").strip()
+            if clean_item == keyword.lower():
                 if idx + 1 < len(raw_texts):
                     val = raw_texts[idx + 1].replace("|", "").strip()
                     if val and not any(k in val.lower() for k in ["name", "nickname", "course", "duration", "nationality"]):
@@ -56,16 +63,20 @@ def parse_docx(file):
     duration = find_field("Duration")
     nationality = find_field("Nationality")
 
+    # Fallback to filename without extension if name isn't cleanly extracted
+    clean_filename = os.path.splitext(filename)[0]
+    final_name = name if name != "N/A" else f"Student ({clean_filename})"
+
     student_data = {
-        "Name": name if name != "N/A" else "Unknown Student",
-        "Nickname": nickname,
-        "Course": course,
-        "Duration": duration,
-        "Nationality": nationality,
+        "Name": final_name,
+        "Nickname": nickname if nickname != "N/A" else "-",
+        "Course": course if course != "N/A" else "-",
+        "Duration": duration if duration != "N/A" else "-",
+        "Nationality": nationality if nationality != "N/A" else "-",
         "Schedule": []
     }
 
-    # Extract time slots
+    # 2. Extract schedule rows
     for table in doc.tables:
         for row in table.rows:
             row_cells = []
@@ -74,7 +85,6 @@ def parse_docx(file):
                 if txt and (not row_cells or row_cells[-1] != txt):
                     row_cells.append(txt)
             
-            # Check if row starts with a time format like 08:00 - 08:45
             if row_cells and re.search(r"\d{2}:\d{2}\s*-\s*\d{2}:\d{2}", row_cells[0]):
                 student_data["Schedule"].append({
                     "Time Period": row_cells[0] if len(row_cells) > 0 else "-",
@@ -96,7 +106,7 @@ with tab_search:
     total_students = len(st.session_state["schedules_db"])
     st.caption(f"📊 Currently storing **{total_students}** student schedule(s).")
     
-    search_query = st.text_input("Enter Student Full Name or Nickname (e.g. Emilia or LIN):", "").strip()
+    search_query = st.text_input("Enter Student Full Name or Nickname:", "").strip()
 
     if search_query:
         matches = [
@@ -134,9 +144,9 @@ with tab_upload:
             count = 0
             for file in uploaded_files:
                 try:
-                    parsed_info = parse_docx(file)
+                    parsed_info = parse_docx(file, file.name)
                     
-                    # Prevent overwriting unless same student name
+                    # Remove existing entry only if name matches exact string
                     st.session_state["schedules_db"] = [
                         s for s in st.session_state["schedules_db"] 
                         if s["Name"].lower() != parsed_info["Name"].lower()
@@ -148,13 +158,21 @@ with tab_upload:
                     st.error(f"Error reading {file.name}: {e}")
 
             save_schedules(st.session_state["schedules_db"])
-            st.success(f"Successfully loaded and saved {count} schedule(s)! Switch to the Search tab to test it.")
+            st.success(f"Successfully processed {count} file(s)! Check the 'Stored Records' or 'Search' tab.")
 
 # TAB 3: RECORDS LIST
 with tab_records:
     st.subheader("List of All Stored Students")
     if st.session_state["schedules_db"]:
-        student_list = [{"Full Name": s["Name"], "Nickname": s["Nickname"], "Course": s["Course"]} for s in st.session_state["schedules_db"]]
+        student_list = [
+            {
+                "Full Name / Record ID": s["Name"], 
+                "Nickname": s["Nickname"], 
+                "Course": s["Course"],
+                "Classes Extracted": len(s["Schedule"])
+            } 
+            for s in st.session_state["schedules_db"]
+        ]
         st.table(pd.DataFrame(student_list))
         
         if st.button("Clear All Stored Schedules"):
