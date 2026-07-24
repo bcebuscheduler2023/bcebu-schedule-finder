@@ -1,74 +1,118 @@
 import streamlit as st
 import pandas as pd
 import docx
-import re
+import json
+import os
 
 st.set_page_config(page_title="B'Cebu Class Schedule Finder", page_icon="📚", layout="wide")
 
 st.title("🎓 B'Cebu Class Schedule System")
 st.caption("API NEXT EDU, Inc. — Word Document Extractor & Search App")
 
-# Initialize persistent session storage for schedules
-if "schedules_db" not in st.session_state:
-    st.session_state["schedules_db"] = []
+DB_FILE = "schedules_data.json"
 
-# Helper function to extract schedule data from Word tables
+# Helper function to load data permanently
+def load_schedules():
+    if os.path.exists(DB_FILE):
+        try:
+            with open(DB_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+# Helper function to save data permanently
+def save_schedules(data):
+    with open(DB_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+# Load database into session state
+if "schedules_db" not in st.session_state:
+    st.session_state["schedules_db"] = load_schedules()
+
+# Helper function to parse Word (.docx) files accurately
 def parse_docx(file):
     doc = docx.Document(file)
     
-    # Extract text from paragraphs
-    full_text = " ".join([p.text.strip() for p in doc.paragraphs if p.text.strip()])
+    full_text_list = []
     
-    # Extract text from tables if paragraphs are formatted in tables
+    # Read text from paragraphs
+    for p in doc.paragraphs:
+        if p.text.strip():
+            full_text_list.append(p.text.strip())
+            
+    # Read text from tables
+    table_rows_data = []
     for table in doc.tables:
         for row in table.rows:
-            full_text += " " + " ".join([cell.text.strip() for cell in row.cells if cell.text.strip()])
+            row_cells = [cell.text.strip().replace('\n', ' ') for cell in row.cells if cell.text.strip()]
+            # Remove consecutive duplicate text from merged cells
+            cleaned_row = []
+            for cell in row_cells:
+                if not cleaned_row or cleaned_row[-1] != cell:
+                    cleaned_row.append(cell)
+            if cleaned_row:
+                table_rows_data.append(cleaned_row)
+                full_text_list.append(" | ".join(cleaned_row))
 
-    # Extract Metadata using pattern matching
-    name_match = re.search(r"Name:\s*\|?\s*([A-Za-z,\-\s]+)", full_text, re.IGNORECASE)
-    nickname_match = re.search(r"Nickname:\s*\|?\s*([A-Za-z0-9\-\s]+)", full_text, re.IGNORECASE)
-    course_match = re.search(r"Course:\s*\|?\s*([A-Za-z0-9\-\s]+)", full_text, re.IGNORECASE)
-    duration_match = re.search(r"Duration:\s*\|?\s*([A-Za-z0-9\-\s]+)", full_text, re.IGNORECASE)
-    nationality_match = re.search(r"Nationality:\s*\|?\s*([A-Za-z0-9\-\s]+)", full_text, re.IGNORECASE)
+    full_text = " ".join(full_text_list)
+
+    # Extract metadata flexibly
+    name = "Unknown Student"
+    nickname = "N/A"
+    course = "N/A"
+    duration = "N/A"
+    nationality = "N/A"
+
+    for row in table_rows_data:
+        row_str = " ".join(row)
+        if "Name:" in row_str or "Name" in row:
+            for i, cell in enumerate(row):
+                if "Name:" in cell and i + 1 < len(row):
+                    name = row[i+1].replace("|", "").strip()
+                if "Nickname:" in cell and i + 1 < len(row):
+                    nickname = row[i+1].replace("|", "").strip()
+                if "Course:" in cell and i + 1 < len(row):
+                    course = row[i+1].replace("|", "").strip()
+                if "Duration:" in cell and i + 1 < len(row):
+                    duration = row[i+1].replace("|", "").strip()
+                if "Nationality:" in cell and i + 1 < len(row):
+                    nationality = row[i+1].replace("|", "").strip()
 
     student_data = {
-        "Name": name_match.group(1).strip() if name_match else "Unknown Student",
-        "Nickname": nickname_match.group(1).strip() if nickname_match else "N/A",
-        "Course": course_match.group(1).strip() if course_match else "N/A",
-        "Duration": duration_match.group(1).strip() if duration_match else "N/A",
-        "Nationality": nationality_match.group(1).strip() if nationality_match else "N/A",
+        "Name": name,
+        "Nickname": nickname,
+        "Course": course,
+        "Duration": duration,
+        "Nationality": nationality,
         "Schedule": []
     }
 
-    # Extract Schedule Rows from Tables
-    for table in doc.tables:
-        for row in table.rows:
-            cells = [c.text.strip() for c in row.cells if c.text.strip()]
-            # Clean duplicate adjacent text in cells caused by merged cells
-            cleaned_cells = []
-            for cell in cells:
-                if not cleaned_cells or cleaned_cells[-1] != cell:
-                    cleaned_cells.append(cell)
-
-            # Match rows starting with time periods (e.g. 08:00 - 08:45)
-            if cleaned_cells and re.match(r"\d{2}:\d{2}\s*-\s*\d{2}:\d{2}", cleaned_cells[0]):
-                student_data["Schedule"].append({
-                    "Time": cleaned_cells[0],
-                    "Period": cleaned_cells[1] if len(cleaned_cells) > 1 else "",
-                    "Room": cleaned_cells[2] if len(cleaned_cells) > 2 else "",
-                    "Teacher": cleaned_cells[3] if len(cleaned_cells) > 3 else "",
-                    "Type": cleaned_cells[4] if len(cleaned_cells) > 4 else "",
-                    "Subject / Remarks": cleaned_cells[5] if len(cleaned_cells) > 5 else ""
-                })
+    # Extract schedule periods (rows containing time ranges like 08:00 - 08:45)
+    for row in table_rows_data:
+        if len(row) >= 3 and ":" in row[0] and "-" in row[0]:
+            student_data["Schedule"].append({
+                "Time Period": row[0],
+                "Period": row[1] if len(row) > 1 else "",
+                "Room": row[2] if len(row) > 2 else "",
+                "Teacher": row[3] if len(row) > 3 else "",
+                "Type": row[4] if len(row) > 4 else "",
+                "Subject / Book": row[5] if len(row) > 5 else (row[-1] if len(row) > 3 else "")
+            })
 
     return student_data
 
-# App Navigation
+# App Tabs
 tab_search, tab_upload = st.tabs(["🔍 Search Student Schedules", "📤 Admin Upload Word Files (.docx)"])
 
 # TAB 1: SEARCH INTERFACE
 with tab_search:
     st.subheader("Search Schedules")
+    
+    # Show active students counter
+    total_students = len(st.session_state["schedules_db"])
+    st.caption(f"📊 Currently storing **{total_students}** student schedule(s).")
+    
     search_query = st.text_input("Enter Student Full Name or Nickname (e.g. Emilia or LIN):", "").strip()
 
     if search_query:
@@ -91,9 +135,9 @@ with tab_search:
                     else:
                         st.warning("No individual class periods detected in this document.")
         else:
-            st.warning(f"No student found matching '{search_query}'. Please ensure the document was uploaded in the Admin tab.")
+            st.warning(f"No student found matching '{search_query}'.")
     else:
-        st.info("💡 Enter a student name or nickname above to view their schedule.")
+        st.info("💡 Type a student name or nickname above to view their schedule.")
 
 # TAB 2: UPLOAD INTERFACE
 with tab_upload:
@@ -109,9 +153,10 @@ with tab_upload:
                 try:
                     parsed_info = parse_docx(file)
                     
-                    # Remove previous entry for this student if updating
+                    # Remove old version of student schedule if updating
                     st.session_state["schedules_db"] = [
-                        s for s in st.session_state["schedules_db"] if s["Name"].lower() != parsed_info["Name"].lower()
+                        s for s in st.session_state["schedules_db"] 
+                        if s["Name"].lower() != parsed_info["Name"].lower()
                     ]
                     
                     st.session_state["schedules_db"].append(parsed_info)
@@ -119,4 +164,6 @@ with tab_upload:
                 except Exception as e:
                     st.error(f"Error reading {file.name}: {e}")
 
-            st.success(f"Successfully loaded {count} schedule(s)! Switch to the Search tab to test it.")
+            # Save to permanent disk file
+            save_schedules(st.session_state["schedules_db"])
+            st.success(f"Successfully loaded and saved {count} schedule(s)! Switch to the Search tab to test it.")
